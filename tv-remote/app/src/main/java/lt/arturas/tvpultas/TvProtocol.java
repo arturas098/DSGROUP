@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import java.io.*;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.X509Certificate;
@@ -49,7 +51,8 @@ final class TvProtocol {
     private SSLSocket pairing;
     private String address;
     private volatile String pairingStage = "nepradėta";
-    private volatile String tlsVersion = "auto";
+    private volatile String tlsVersion = "TLS1.2";
+    private volatile String networkDetails = "";
     private X509Certificate pairingPeer;
 
     TvProtocol(Context ctx, Listener callback) {
@@ -94,7 +97,8 @@ final class TvProtocol {
         network.execute(() -> {
             try {
                 closePairing();
-                pairingStage = "TLS ryšys (portas 6467)";
+                pairingStage = "TCP jungtis į 6467";
+                networkDetails = "";
                 publish("Poravimas: saugus TLS ryšys…", false);
                 pairing = tls(address, 6467, false);
                 tlsVersion = pairing.getSession().getProtocol();
@@ -134,9 +138,14 @@ final class TvProtocol {
             } catch (Exception e) {
                 closePairing();
                 String error = e instanceof EOFException
-                        ? "TV uždarė ryšį. Žingsnis: " + pairingStage + ", TLS " + tlsVersion
+                        ? "TV uždarė jungtį: " + pairingStage + " / " + tlsVersion
                         : summarize(e) + " (" + pairingStage + ")";
-                publish("Poravimo klaida: " + error, false);
+                // A mDNS-advertised TV is not proof the pairing port accepts TLS.
+                // Check TCP reachability independently to narrow down failures.
+                String diagnostic = "TCP6467=" + portProbe(address,6467) +
+                        "; TCP6466=" + portProbe(address,6466) +
+                        "; bandytas " + tlsVersion;
+                publish("Poravimo klaida: " + error + " | " + diagnostic, false);
             }
         });
     }
@@ -263,38 +272,72 @@ final class TvProtocol {
         listener.onStatus(message, connected);
     }
 
+    private static String portProbe(String host, int port) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host,port),2500);
+            return "ATIDARYTAS";
+        } catch (Exception e) {
+            return "NEPASIEKIAMAS(" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
     private SSLSocket tls(String host, int port, boolean enforcePin) throws Exception {
-        // Android TV Remote Service expects a real RSA X.509 client certificate.
-        // PKCS#12 with the platform KeyManagerFactory has broad TV compatibility.
         KeyManagerFactory km = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         km.init(identityStore(), STORE_PASSWORD);
         final String pinned = preferences.getString("pin","");
         X509TrustManager trust = new X509TrustManager() {
             @Override public void checkClientTrusted(X509Certificate[] certs, String auth) {}
-            @Override public void checkServerTrusted(X509Certificate[] certs, String auth) throws java.security.cert.CertificateException {
-                if (certs == null || certs.length == 0) throw new java.security.cert.CertificateException("TV certificate missing");
+            @Override public void checkServerTrusted(X509Certificate[] certs, String auth)
+                    throws java.security.cert.CertificateException {
+                if (certs == null || certs.length == 0)
+                    throw new java.security.cert.CertificateException("TV certificate missing");
                 if (enforcePin) {
                     try {
-                        String actual = hex(MessageDigest.getInstance("SHA-256").digest(certs[0].getEncoded()));
+                        String actual = hex(MessageDigest.getInstance("SHA-256")
+                                .digest(certs[0].getEncoded()));
                         if (pinned.isEmpty() || !pinned.equals(actual))
-                            throw new java.security.cert.CertificateException("TV sertifikatas pasikeitė – poruokite iš naujo");
-                    } catch (NoSuchAlgorithmException ex) { throw new java.security.cert.CertificateException(ex); }
+                            throw new java.security.cert.CertificateException(
+                                    "TV sertifikatas pasikeitė – poruokite iš naujo");
+                    } catch (NoSuchAlgorithmException ex) {
+                        throw new java.security.cert.CertificateException(ex);
+                    }
                 }
             }
-            @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            @Override public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
         };
         SSLContext ssl = SSLContext.getInstance("TLS");
         ssl.init(km.getKeyManagers(), new TrustManager[]{trust}, new SecureRandom());
-        SSLSocket socket = (SSLSocket) ssl.getSocketFactory().createSocket();
-        // Allow the platform to negotiate TLS 1.3 or TLS 1.2 with the TV.
+
+        // Independent, timed TCP connection followed by TLS wrapping, as used
+        // by EndLess728/MiTV-Remote's Android transport. Some Android TV Remote
+        // servers hang rather than reject the TLS 1.3 ClientHello.
+        pairingStage = "TCP jungtis į " + port;
+        Socket plain = new Socket();
+        plain.setTcpNoDelay(true);
+        plain.setKeepAlive(true);
         try {
-            socket.connect(new InetSocketAddress(host,port),4500);
-            socket.setSoTimeout(7000);
-            socket.startHandshake();
-            return socket;
-        } catch (Exception e) {
-            try { socket.close(); } catch (Exception ignored) {}
-            throw e;
+            plain.connect(new InetSocketAddress(host,port),6000);
+            pairingStage = "TCP OK, TLS 1.2 handshake (portas " + port + ")";
+            tlsVersion = "TLSv1.2";
+            SSLSocket socket = (SSLSocket)ssl.getSocketFactory()
+                    .createSocket(plain,host,port,true);
+            socket.setEnabledProtocols(new String[]{"TLSv1.2"});
+            socket.setSoTimeout(18000);
+            try {
+                socket.startHandshake();
+                tlsVersion = socket.getSession().getProtocol();
+                socket.setSoTimeout(7000);
+                pairingStage = "TLS sėkmingas, laukiama TV atsakymo";
+                return socket;
+            } catch (Exception fail) {
+                socket.close();
+                throw new IOException("TLS 1.2 handshake: " + summarize(fail),fail);
+            }
+        } catch (Exception fail) {
+            try { plain.close(); } catch (Exception ignored) {}
+            throw fail;
         }
     }
 
