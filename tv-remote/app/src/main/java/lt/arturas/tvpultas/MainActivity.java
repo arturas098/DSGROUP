@@ -6,6 +6,9 @@ import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.os.Build;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import android.os.Bundle;
 import android.speech.RecognizerIntent;
 import android.text.*;
@@ -305,8 +308,25 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
                 nsd.resolveService(info,new NsdManager.ResolveListener() {
                     @Override public void onResolveFailed(NsdServiceInfo i,int error) {}
                     @Override public void onServiceResolved(NsdServiceInfo service) {
-                        if(service.getHost()!=null) runOnUiThread(()->found.put(
-                            service.getServiceName(),service.getHost().getHostAddress()));
+                        // Android 14+ can return IPv6 first. Most TV Remote
+                        // services expose their pairing/control ports on IPv4.
+                        String address = null;
+                        if(Build.VERSION.SDK_INT>=34) {
+                            for(InetAddress candidate : service.getHostAddresses()) {
+                                if(candidate instanceof Inet4Address) {
+                                    address=candidate.getHostAddress();
+                                    break;
+                                }
+                            }
+                        }
+                        if(address==null && service.getHost() instanceof Inet4Address)
+                            address=service.getHost().getHostAddress();
+                        if(address==null && service.getHost()!=null)
+                            address=service.getHost().getHostAddress();
+                        if(address!=null) {
+                            final String ip=address;
+                            runOnUiThread(()->found.put(service.getServiceName(),ip));
+                        }
                     }
                 });
             }
