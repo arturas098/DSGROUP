@@ -2,8 +2,6 @@ package lt.arturas.tvpultas;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 import java.io.*;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
@@ -15,11 +13,18 @@ import java.util.*;
 import java.util.concurrent.*;
 import javax.net.ssl.*;
 import javax.security.auth.x500.X500Principal;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.asn1.x509.BasicConstraints;
+import org.bouncycastle.asn1.x509.Extension;
+import java.security.cert.Certificate;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Independent Android TV Remote v2 client. All commands travel over the local
  * network using TLS. The TV's 6-hex-digit PIN authenticates initial pairing.
- * A pinned TV certificate and app-private hardware keystore protect reconnection.
+ * A pinned TV certificate and an app-private PKCS#12 identity protect reconnection.
  */
 final class TvProtocol {
     interface Listener {
@@ -29,7 +34,9 @@ final class TvProtocol {
         void onTvKeyboard();
     }
 
-    private static final String KEY_ALIAS = "tvpultas.identity.v1";
+    private static final String KEY_ALIAS = "tv-pultas";
+    private static final char[] STORE_PASSWORD = "tvpultas-v2".toCharArray();
+    private final AtomicInteger attempt = new AtomicInteger();
     private final Context context;
     private final SharedPreferences preferences;
     private final Listener listener;
@@ -62,24 +69,27 @@ final class TvProtocol {
 
     void connect(String host) {
         address = host.trim();
+        int ticket = attempt.incrementAndGet();
         closeRemote();
         network.execute(() -> {
-            while (running && address.equals(host.trim())) {
+            while (running && ticket == attempt.get()) {
                 try {
                     publish("Jungiamasi prie " + host + "…", false);
                     connectRemote(host.trim());
                 } catch (Exception error) {
-                    if (running) publish("Ryšio nėra: " + summarize(error), false);
+                    if (running && ticket == attempt.get()) publish("Ryšio nėra: " + summarize(error), false);
                 } finally {
                     closeRemote();
                 }
-                if (running) try { Thread.sleep(2500); } catch (InterruptedException ignored) { return; }
+                if (running && ticket == attempt.get())
+                    try { Thread.sleep(2500); } catch (InterruptedException ignored) { return; }
             }
         });
     }
 
     void beginPairing(String host) {
         address = host.trim();
+        attempt.incrementAndGet();
         closeRemote();
         network.execute(() -> {
             try {
@@ -240,19 +250,11 @@ final class TvProtocol {
     }
 
     private SSLSocket tls(String host, int port, boolean enforcePin) throws Exception {
-        final X509Certificate own = identityCertificate();
-        final PrivateKey key = identityPrivateKey();
+        // Android TV Remote Service expects a real RSA X.509 client certificate.
+        // PKCS#12 with the platform KeyManagerFactory has broad TV compatibility.
+        KeyManagerFactory km = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        km.init(identityStore(), STORE_PASSWORD);
         final String pinned = preferences.getString("pin","");
-        X509ExtendedKeyManager km = new X509ExtendedKeyManager() {
-            @Override public String[] getClientAliases(String keyType, Principal[] issuers) { return new String[]{KEY_ALIAS}; }
-            @Override public String chooseClientAlias(String[] keyTypes, Principal[] issuers, java.net.Socket socket) { return KEY_ALIAS; }
-            @Override public String[] getServerAliases(String keyType, Principal[] issuers) { return null; }
-            @Override public String chooseServerAlias(String keyType, Principal[] issuers, java.net.Socket socket) { return null; }
-            @Override public X509Certificate[] getCertificateChain(String alias) { return new X509Certificate[]{own}; }
-            @Override public PrivateKey getPrivateKey(String alias) { return key; }
-            @Override public String chooseEngineClientAlias(String[] keyTypes, Principal[] issuers, SSLEngine engine) { return KEY_ALIAS; }
-            @Override public String chooseEngineServerAlias(String keyType, Principal[] issuers, SSLEngine engine) { return null; }
-        };
         X509TrustManager trust = new X509TrustManager() {
             @Override public void checkClientTrusted(X509Certificate[] certs, String auth) {}
             @Override public void checkServerTrusted(X509Certificate[] certs, String auth) throws java.security.cert.CertificateException {
@@ -268,39 +270,52 @@ final class TvProtocol {
             @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
         };
         SSLContext ssl = SSLContext.getInstance("TLS");
-        ssl.init(new KeyManager[]{km}, new TrustManager[]{trust}, new SecureRandom());
+        ssl.init(km.getKeyManagers(), new TrustManager[]{trust}, new SecureRandom());
         SSLSocket socket = (SSLSocket) ssl.getSocketFactory().createSocket();
-        socket.connect(new InetSocketAddress(host,port),4500);
-        socket.setSoTimeout(7000);
-        socket.startHandshake();
-        return socket;
+        socket.setEnabledProtocols(new String[]{"TLSv1.2"});
+        try {
+            socket.connect(new InetSocketAddress(host,port),4500);
+            socket.setSoTimeout(7000);
+            socket.startHandshake();
+            return socket;
+        } catch (Exception e) {
+            try { socket.close(); } catch (Exception ignored) {}
+            throw e;
+        }
     }
 
     private synchronized X509Certificate identityCertificate() throws Exception {
         return (X509Certificate) identityStore().getCertificate(KEY_ALIAS);
     }
-    private synchronized PrivateKey identityPrivateKey() throws Exception {
-        return (PrivateKey) identityStore().getKey(KEY_ALIAS,null);
-    }
-    private KeyStore identityStore() throws Exception {
-        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
-        store.load(null);
-        if (!store.containsAlias(KEY_ALIAS)) {
-            long now = System.currentTimeMillis();
-            KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(KEY_ALIAS,
-                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
-                    .setKeySize(2048)
-                    .setDigests(KeyProperties.DIGEST_SHA256,KeyProperties.DIGEST_SHA1)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                    .setCertificateSubject(new X500Principal("CN=TV Pultas"))
-                    .setCertificateSerialNumber(BigInteger.ONE)
-                    .setCertificateNotBefore(new Date(now-60_000L))
-                    .setCertificateNotAfter(new Date(now+630720000000L))
-                    .build();
-            KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA","AndroidKeyStore");
-            generator.initialize(spec);
-            generator.generateKeyPair();
-            store.load(null);
+
+    private synchronized KeyStore identityStore() throws Exception {
+        File certFile = new File(context.getFilesDir(), "tv-pultas-identity.p12");
+        KeyStore store = KeyStore.getInstance("PKCS12");
+        if (certFile.exists()) {
+            try (FileInputStream in = new FileInputStream(certFile)) {
+                store.load(in, STORE_PASSWORD);
+                if (store.containsAlias(KEY_ALIAS)) return store;
+            } catch (Exception broken) {
+                // Invalid/old store: generate a new identity. TV needs pairing again.
+                certFile.delete();
+            }
+        }
+        KeyPairGenerator rsa = KeyPairGenerator.getInstance("RSA");
+        rsa.initialize(2048);
+        KeyPair identity = rsa.generateKeyPair();
+        long now = System.currentTimeMillis();
+        X500Principal name = new X500Principal("CN=TV Pultas");
+        JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
+            name, BigInteger.valueOf(now), new Date(now - 86400000L),
+            new Date(now + 10L * 365 * 86400000L), name, identity.getPublic());
+        certBuilder.addExtension(Extension.basicConstraints, false, new BasicConstraints(false));
+        X509Certificate certificate = new JcaX509CertificateConverter().getCertificate(
+            certBuilder.build(new JcaContentSignerBuilder("SHA256withRSA").build(identity.getPrivate())));
+        certificate.verify(identity.getPublic());
+        store.load(null,null);
+        store.setKeyEntry(KEY_ALIAS, identity.getPrivate(), STORE_PASSWORD, new Certificate[]{certificate});
+        try (FileOutputStream out = new FileOutputStream(certFile)) {
+            store.store(out, STORE_PASSWORD);
         }
         return store;
     }
@@ -315,7 +330,10 @@ final class TvProtocol {
     }
 
     private static String summarize(Exception e) {
-        return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        if (detail.contains("TLSV1_ALERT_CERTIFICATE_REQUIRED") || detail.contains("SSLV3_ALERT_BAD_CERTIFICATE"))
+            return "TV atmetė sertifikatą – poruokite iš naujo. " + detail;
+        return detail;
     }
     private static String hex(byte[] bytes) {
         StringBuilder b=new StringBuilder();
