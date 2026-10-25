@@ -28,18 +28,18 @@ jobs:
       - name: Compile TV Pultas
         run: gradle --no-daemon -p tv-remote :app:testDebugUnitTest :app:assembleDebug
       - name: Name APK
-        run: cp tv-remote/app/build/outputs/apk/debug/app-debug.apk TV-Pultas-v1.5.apk
+        run: cp tv-remote/app/build/outputs/apk/debug/app-debug.apk TV-Pultas-v1.6.apk
       - uses: actions/upload-artifact@v4
         with:
           name: TV-Pultas-APK
-          path: TV-Pultas-v1.5.apk
+          path: TV-Pultas-v1.6.apk
           if-no-files-found: error
       - name: Publish downloadable APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view tv-pultas-v1-5 >/dev/null 2>&1; then
-            gh release upload tv-pultas-v1-5 TV-Pultas-v1.5.apk --clobber
+          if gh release view tv-pultas-v1-6 >/dev/null 2>&1; then
+            gh release upload tv-pultas-v1-6 TV-Pultas-v1.6.apk --clobber
           else
-            gh release create tv-pultas-v1-5 TV-Pultas-v1.5.apk --title "TV Pultas v1.5" --notes "Standalone Android TV remote (debug APK)" --latest=false
+            gh release create tv-pultas-v1-6 TV-Pultas-v1.6.apk --title "TV Pultas v1.6" --notes "Standalone Android TV remote (debug APK)" --latest=false
           fi
