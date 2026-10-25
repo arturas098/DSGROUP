@@ -289,9 +289,41 @@ final class TvProtocol {
     }
 
     void text(String content) {
-        if (!ready || content == null || content.isEmpty()) return;
-        sendRemote(imePacket(imeCounter, fieldCounter, content));
+        sendTextMode(content, 0);
     }
+
+    /**
+     * Android TV Remote v2's IME packet isn't acknowledged by the television.
+     * Mode 0 matches androidtvremote2's length-minus-one cursor convention.
+     * Mode 1 matches MiTV-Remote's length cursor convention.
+     * Mode 2 sends key codes (ASCII only) for TVs ignoring IME packets.
+     */
+    void sendTextMode(String content, int mode) {
+        if (!ready || content == null || content.isEmpty()) return;
+        if (mode == 2) {
+            sendAsciiKeys(content);
+        } else {
+            sendRemote(imePacketVariant(imeCounter, fieldCounter, content, mode == 0));
+        }
+    }
+
+    private void sendAsciiKeys(String content) {
+        for (int i=0; i<content.length();i++) {
+            char c=Character.toLowerCase(content.charAt(i));
+            int code;
+            if(c >= 'a' && c <= 'z') code = 29 + (c - 'a');
+            else if(c >= '0' && c <= '9') code = 7 + (c - '0');
+            else if(c == ' ') code = 62;
+            else if(c == '.') code = 56;
+            else if(c == ',') code = 55;
+            else if(c == '-') code = 69;
+            else if(c == '/') code = 76;
+            else continue; // Unsupported character in the keycode fallback
+            key(code);
+        }
+    }
+
+    void hideTvKeyboard() { key(4); }
 
     String keyboardStatus() {
         if (!ready) return "TV neprisijungęs";
@@ -313,11 +345,18 @@ final class TvProtocol {
         return -1;
     }
 
-    /** Reference-compatible IME text packet. Caret is AFTER inserted text. */
+    /** MiTV-Remote convention: caret after the inserted text. */
     static byte[] imePacket(int imeCount, int fieldCount, String content) {
+        return imePacketVariant(imeCount, fieldCount, content, false);
+    }
+
+    /** androidtvremote2 convention: caret at length minus one. */
+    static byte[] imePacketVariant(int imeCount, int fieldCount,
+                                  String content, boolean legacyCaret) {
         if (content == null || content.isEmpty())
             throw new IllegalArgumentException("Empty IME text");
-        int caret=content.codePointCount(0,content.length());
+        int length=content.codePointCount(0,content.length());
+        int caret=legacyCaret ? Math.max(0,length-1) : length;
         byte[] object=Proto.fields(Proto.integer(1,caret),
                 Proto.integer(2,caret),Proto.text(3,content));
         byte[] edit=Proto.fields(Proto.integer(1,1),Proto.nested(2,object));

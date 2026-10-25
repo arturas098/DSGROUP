@@ -65,4 +65,25 @@ public class TvProtocolTest {
         byte[] remote=TvProtocol.imePacket(7,9,"abc");
         assertEquals(-1,TvProtocol.readImeFieldCounter(TvProtocol.Proto.parse(remote)));
     }
+
+    @Test public void legacyImePacketPlacesCaretAsAndroidTvRemote2() throws Exception {
+        byte[] packet=TvProtocol.imePacketVariant(1,1,"Entropy",true);
+        TvProtocol.Proto.Message envelope=TvProtocol.Proto.parse(packet);
+        TvProtocol.Proto.Message batch=envelope.child(21);
+        assertEquals(1L,batch.number(1,-1));
+        assertEquals(1L,batch.number(2,-1));
+        TvProtocol.Proto.Message edit=batch.child(3);
+        TvProtocol.Proto.Message field=edit.child(2);
+        assertEquals(6L,field.number(1,-1));
+        assertEquals(6L,field.number(2,-1));
+    }
+
+    @Test public void currentImePacketPlacesCaretAfterText() throws Exception {
+        byte[] packet=TvProtocol.imePacketVariant(1,1,"Entropy",false);
+        TvProtocol.Proto.Message envelope=TvProtocol.Proto.parse(packet);
+        TvProtocol.Proto.Message batch=envelope.child(21);
+        TvProtocol.Proto.Message field=batch.child(3).child(2);
+        assertEquals(7L,field.number(1,-1));
+        assertEquals(7L,field.number(2,-1));
+    }
 }
