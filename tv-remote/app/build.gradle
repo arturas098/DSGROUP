@@ -1,5 +1,10 @@
 plugins { id 'com.android.application' }
 
+// Standard BouncyCastle X.509 certificate generation; used only when pairing.
+dependencies {
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
+}
+
 android {
     namespace 'lt.arturas.tvpultas'
     compileSdk 35
