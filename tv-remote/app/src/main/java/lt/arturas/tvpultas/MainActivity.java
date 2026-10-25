@@ -27,6 +27,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
     private LinearLayout root, header, body;
     private TextView deviceLabel, status;
     private EditText typing;
+    private TextView keyboardInfo;
     private boolean keyboardShown;
     private NsdManager nsd;
     private NsdManager.DiscoveryListener finder;
@@ -88,6 +89,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
     }
     private void buildScreen(boolean typingMode) {
         keyboardShown=typingMode;
+        keyboardInfo=null;
         root=new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(20),dp(12),dp(20),dp(16));
@@ -194,14 +196,31 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
         typing.setPadding(dp(5),dp(62),dp(5),dp(5));
         body.addView(typing,new LinearLayout.LayoutParams(-1,0,1));
         typing.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence t,int start,int count,int after) {}
+            private String previous="";
+            @Override public void beforeTextChanged(CharSequence t,int start,int count,int after) {
+                previous=t.toString();
+            }
             @Override public void onTextChanged(CharSequence t,int start,int before,int count) {
-                if(count>0) tv.text(t.subSequence(start,start+count).toString());
-                if(before>count) for(int i=0;i<before-count;i++) sendKey(67);
+                // Gboard corrections can REPLACE text instead of appending.
+                // Compare the old and new suffix, send KEYCODE_DEL for removed
+                // characters, then IME-INSERT for only the newly added suffix.
+                // Sending the full EditText value for each key duplicates text on TV.
+                String current=t.toString();
+                int common=0;
+                int limit=Math.min(previous.length(),current.length());
+                while(common<limit && previous.charAt(common)==current.charAt(common))
+                    common++;
+                int removed=previous.codePointCount(common,previous.length());
+                for(int i=0;i<removed;i++) tv.key(67); // Android KEYCODE_DEL
+                if(common<current.length()) tv.text(current.substring(common));
             }
             @Override public void afterTextChanged(Editable e) {}
         });
         typing.setOnEditorActionListener((view,id,event)->{ sendKey(66); return true; });
+
+        keyboardInfo=label(tv.keyboardStatus(),12,GREY);
+        keyboardInfo.setGravity(Gravity.CENTER);
+        body.addView(keyboardInfo,new LinearLayout.LayoutParams(-1,dp(34)));
 
         TextView switcher=label("⠿   Grįžti į pultą",17,GREY);
         switcher.setBackground(borderShape(BACKGROUND,50));
@@ -356,7 +375,13 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
         });
     }
     @Override public void onPaired() { runOnUiThread(()->Toast.makeText(this,"TV suporuotas",Toast.LENGTH_SHORT).show()); }
-    @Override public void onTvKeyboard() { runOnUiThread(()->{if(!keyboardShown && tv.isConnected()) buildScreen(true);}); }
+    @Override public void onTvKeyboard() {
+        runOnUiThread(()->{
+            if(!tv.isConnected()) return;
+            if(!keyboardShown) buildScreen(true);
+            if(keyboardInfo!=null) keyboardInfo.setText(tv.keyboardStatus());
+        });
+    }
     @Override protected void onDestroy() {
         if(nsd!=null && finder!=null) try {nsd.stopServiceDiscovery(finder);}catch(Exception ignored){}
         tv.shutdown();

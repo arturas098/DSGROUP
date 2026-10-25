@@ -40,4 +40,29 @@ public class TvProtocolTest {
         };
         assertArrayEquals(known,request);
     }
+    @Test public void imePacketMatchesRealAndroidTvFixture() {
+        // MiTV-Remote upstream fixture generated using AndroidTVRemote2 proto.
+        byte[] expected={
+            (byte)170,1,22,8,3,16,7,26,16,8,1,18,12,8,5,16,5,26,6,
+            104,(byte)195,(byte)169,108,108,111
+        };
+        assertArrayEquals(expected,TvProtocol.imePacket(3,7,"héllo"));
+    }
+
+    @Test public void imeShowCarriesFieldCounter() throws Exception {
+        byte[] remote=TvProtocol.Proto.nested(22,
+            TvProtocol.Proto.nested(2,TvProtocol.Proto.integer(1,4)));
+        assertEquals(4,TvProtocol.readImeFieldCounter(TvProtocol.Proto.parse(remote)));
+    }
+
+    @Test public void imeKeyInjectCarriesFieldCounter() throws Exception {
+        byte[] remote=TvProtocol.Proto.nested(20,
+            TvProtocol.Proto.nested(2,TvProtocol.Proto.integer(1,6)));
+        assertEquals(6,TvProtocol.readImeFieldCounter(TvProtocol.Proto.parse(remote)));
+    }
+
+    @Test public void imeBatchHasNoShowCounter() throws Exception {
+        byte[] remote=TvProtocol.imePacket(7,9,"abc");
+        assertEquals(-1,TvProtocol.readImeFieldCounter(TvProtocol.Proto.parse(remote)));
+    }
 }

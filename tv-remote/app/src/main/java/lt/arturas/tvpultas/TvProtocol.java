@@ -51,6 +51,7 @@ final class TvProtocol {
     private volatile boolean running = true;
     private volatile boolean ready;
     private volatile int imeCounter, fieldCounter;
+    private volatile boolean tvTextFieldVisible;
     private volatile int features;
     private SSLSocket pairing;
     private String address;
@@ -233,6 +234,9 @@ final class TvProtocol {
         remoteOut = socket.getOutputStream();
         InputStream input = socket.getInputStream();
         ready = false;
+        imeCounter=0;
+        fieldCounter=0;
+        tvTextFieldVisible=false;
         while (running && !socket.isClosed()) {
             Proto.Message m = Proto.parse(readFrame(input));
             if (m.has(1)) {
@@ -254,11 +258,27 @@ final class TvProtocol {
                 publish("Prisijungta", true);
             } else if (m.has(21)) {
                 Proto.Message edit = m.child(21);
-                imeCounter = (int)edit.number(1,0);
-                fieldCounter = (int)edit.number(2,0);
+                imeCounter = (int)edit.number(1, imeCounter);
+                fieldCounter = (int)edit.number(2, fieldCounter);
+                tvTextFieldVisible=true;
                 if (ready) listener.onTvKeyboard();
             } else if (m.has(22)) {
+                // TVs often send the selected field counter here, not in BatchEdit.
+                int counter=readImeFieldCounter(m);
+                if (counter>=0) fieldCounter=counter;
+                tvTextFieldVisible=true;
                 if (ready) listener.onTvKeyboard();
+            } else if (m.has(20)) {
+                // Also handle RemoteImeKeyInject, which can be the only
+                // notification of the focused text field on some TVs.
+                int counter=readImeFieldCounter(m);
+                if (counter>=0) {
+                    fieldCounter=counter;
+                    tvTextFieldVisible=true;
+                    if (ready) listener.onTvKeyboard();
+                }
+            } else if (m.has(3)) {
+                publish("TV atmetė komandą (RemoteError)", ready);
             }
         }
     }
@@ -270,11 +290,39 @@ final class TvProtocol {
 
     void text(String content) {
         if (!ready || content == null || content.isEmpty()) return;
-        int caret = Math.max(0,content.length()-1);
-        byte[] object = Proto.fields(Proto.integer(1,caret),Proto.integer(2,caret),Proto.text(3,content));
-        byte[] edit = Proto.fields(Proto.integer(1,1),Proto.nested(2,object));
-        sendRemote(Proto.nested(21, Proto.fields(
-            Proto.integer(1,imeCounter),Proto.integer(2,fieldCounter),Proto.nested(3,edit))));
+        sendRemote(imePacket(imeCounter, fieldCounter, content));
+    }
+
+    String keyboardStatus() {
+        if (!ready) return "TV neprisijungęs";
+        return tvTextFieldVisible
+            ? "TV įvedimas aktyvus (IME " + imeCounter + ", laukelis " + fieldCounter + ")"
+            : "TV laukelis neaptiktas – pasirinkite teksto lauką televizoriuje";
+    }
+
+    /** Read focused text-field counter from TV's ShowRequest or KeyInject. */
+    static int readImeFieldCounter(Proto.Message remoteMessage) throws IOException {
+        if (remoteMessage.has(22)) {
+            Proto.Message show=remoteMessage.child(22);
+            if (show.has(2)) return (int)show.child(2).number(1,-1);
+        }
+        if (remoteMessage.has(20)) {
+            Proto.Message inject=remoteMessage.child(20);
+            if (inject.has(2)) return (int)inject.child(2).number(1,-1);
+        }
+        return -1;
+    }
+
+    /** Reference-compatible IME text packet. Caret is AFTER inserted text. */
+    static byte[] imePacket(int imeCount, int fieldCount, String content) {
+        if (content == null || content.isEmpty())
+            throw new IllegalArgumentException("Empty IME text");
+        int caret=content.codePointCount(0,content.length());
+        byte[] object=Proto.fields(Proto.integer(1,caret),
+                Proto.integer(2,caret),Proto.text(3,content));
+        byte[] edit=Proto.fields(Proto.integer(1,1),Proto.nested(2,object));
+        return Proto.nested(21, Proto.fields(
+            Proto.integer(1,imeCount),Proto.integer(2,fieldCount),Proto.nested(3,edit)));
     }
 
     void shutdown() {
@@ -431,6 +479,7 @@ final class TvProtocol {
     }
     private void closeRemote() {
         ready=false;
+        tvTextFieldVisible=false;
         SSLSocket s=remote;
         remote=null; remoteOut=null;
         if(s!=null) try{s.close();}catch(Exception ignored){}
