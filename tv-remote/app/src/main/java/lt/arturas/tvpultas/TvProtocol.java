@@ -16,6 +16,10 @@ import java.util.concurrent.*;
 import javax.net.ssl.*;
 import javax.security.auth.x500.X500Principal;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.BasicConstraints;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import java.security.cert.Certificate;
@@ -92,60 +96,82 @@ final class TvProtocol {
 
     void beginPairing(String host) {
         address = host.trim();
-        attempt.incrementAndGet();
+        int ticket = attempt.incrementAndGet();
         closeRemote();
         network.execute(() -> {
-            try {
-                closePairing();
-                pairingStage = "TCP jungtis į 6467";
-                networkDetails = "";
-                publish("Poravimas: saugus TLS ryšys…", false);
-                pairing = tls(address, 6467, false);
-                tlsVersion = pairing.getSession().getProtocol();
-                pairingStage = "užklausa TV (1/3)";
-                publish("Poravimas 1/3: siunčiama užklausa (" + tlsVersion + ")", false);
-                pairingPeer = (X509Certificate) pairing.getSession().getPeerCertificates()[0];
-                pairing.setSoTimeout(12000);
-                OutputStream out = pairing.getOutputStream();
-                sendFrame(out, envelope(10, Proto.fields(
-                    Proto.text(1, "atvremote"), Proto.text(2, "TV Pultas"))));
-
-                InputStream in = pairing.getInputStream();
-                for (int n=0; n<8; n++) {
-                    Proto.Message m = Proto.parse(readFrame(in));
-                    verifyStatus(m);
-                    if (m.has(11)) {
-                        pairingStage = "TV patvirtino, siunčiamos parinktys (2/3)";
-                        publish("Poravimas 2/3: TV atsakė, parinktys…", false);
-                        sendFrame(out, envelope(20, Proto.fields(
-                            Proto.nested(1, Proto.fields(Proto.integer(1,3), Proto.integer(2,6))),
-                            Proto.integer(3,1))));
-                    } else if (m.has(20)) {
-                        pairingStage = "TV parinktys gautos, siunčiama konfigūracija (3/3)";
-                        publish("Poravimas 3/3: TV parinktys gautos…", false);
-                        sendFrame(out, envelope(30, Proto.fields(
-                            Proto.nested(1, Proto.fields(Proto.integer(1,3), Proto.integer(2,6))),
-                            Proto.integer(2,1))));
-                    } else if (m.has(31)) {
-                        pairingStage = "TV rodo kodą";
-                        publish("TV turėtų rodyti 6 simbolių kodą", false);
-                        pairing.setSoTimeout(60000);
-                        listener.onPairingCode();
-                        return;
+            // Most Android TV Remote Services expect "atvremote".
+            // Some Android TV Remote npm integrations use "androidtv-remote".
+            // When the TV hangs up on request #1, try the second service name
+            // on a fresh TLS socket, without requiring another phone action.
+            StringBuilder errors = new StringBuilder();
+            String[] services = {"atvremote", "androidtv-remote"};
+            for (int profile = 0; profile < services.length; profile++) {
+                if (!running || ticket != attempt.get()) return;
+                String service = services[profile];
+                try {
+                    closePairing();
+                    pairingStage = "TCP jungtis į 6467";
+                    tlsVersion = "TLSv1.2";
+                    publish("Poravimas: profilis " + (profile + 1) + "/2…", false);
+                    pairing = tls(address, 6467, false);
+                    pairingPeer = (X509Certificate) pairing.getSession().getPeerCertificates()[0];
+                    java.security.cert.Certificate[] local = pairing.getSession().getLocalCertificates();
+                    if (local == null || local.length == 0)
+                        throw new IOException("TLS klientas nepateikė sertifikato");
+                    pairing.setSoTimeout(12000);
+                    OutputStream out = pairing.getOutputStream();
+                    pairingStage = "užklausa TV (1/3), profilis=" + service;
+                    byte[] request = envelope(10, Proto.fields(
+                        Proto.text(1, service), Proto.text(2, "TV Pultas")));
+                    sendFrame(out, request);
+                    InputStream in = pairing.getInputStream();
+                    for (int n = 0; n < 8; n++) {
+                        Proto.Message m = Proto.parse(readFrame(in));
+                        verifyStatus(m);
+                        if (m.has(11)) {
+                            pairingStage = "TV patvirtino, parinktys (2/3)";
+                            publish("Poravimas 2/3: TV atsakė…", false);
+                            sendFrame(out, envelope(20, Proto.fields(
+                                Proto.nested(1, Proto.fields(
+                                    Proto.integer(1, 3), Proto.integer(2, 6))),
+                                Proto.integer(3, 1))));
+                        } else if (m.has(20)) {
+                            pairingStage = "TV parinktys gautos (3/3)";
+                            publish("Poravimas 3/3: kodas bus TV ekrane…", false);
+                            sendFrame(out, envelope(30, Proto.fields(
+                                Proto.nested(1, Proto.fields(
+                                    Proto.integer(1, 3), Proto.integer(2, 6))),
+                                Proto.integer(2, 1))));
+                        } else if (m.has(31)) {
+                            pairingStage = "TV rodo kodą";
+                            pairing.setSoTimeout(60000);
+                            publish("TV rodo 6 simbolių kodą", false);
+                            listener.onPairingCode();
+                            return;
+                        } else {
+                            throw new IOException("Netikėtas TV pranešimas");
+                        }
                     }
+                    throw new IOException("Per daug poravimo pranešimų");
+                } catch (Exception e) {
+                    String detail = "profilis " + (profile+1) + " (" + service + "): "
+                        + summarize(e) + " [" + pairingStage + "]";
+                    if (errors.length() > 0) errors.append(" | ");
+                    errors.append(detail);
+                    closePairing();
+                    boolean retryAlternative = profile == 0 &&
+                        pairingStage.startsWith("užklausa TV (1/3)") &&
+                        (e instanceof EOFException ||
+                         e instanceof java.net.SocketTimeoutException ||
+                         e instanceof java.net.SocketException);
+                    if (!retryAlternative) break;
+                    publish("TV atmetė pirmą poravimo profilį, bandome kitą…", false);
                 }
-                throw new IOException("TV nepatvirtino poravimo; paskutinis žingsnis: " + pairingStage);
-            } catch (Exception e) {
-                closePairing();
-                String error = e instanceof EOFException
-                        ? "TV uždarė jungtį: " + pairingStage + " / " + tlsVersion
-                        : summarize(e) + " (" + pairingStage + ")";
-                // A mDNS-advertised TV is not proof the pairing port accepts TLS.
-                // Check TCP reachability independently to narrow down failures.
-                String diagnostic = "TCP6467=" + portProbe(address,6467) +
-                        "; TCP6466=" + portProbe(address,6466) +
-                        "; bandytas " + tlsVersion;
-                publish("Poravimo klaida: " + error + " | " + diagnostic, false);
+            }
+            if (running && ticket == attempt.get()) {
+                publish("Poravimo klaida: " + errors
+                    + " | TCP6467=" + portProbe(address,6467)
+                    + "; TCP6466=" + portProbe(address,6466), false);
             }
         });
     }
@@ -346,7 +372,7 @@ final class TvProtocol {
     }
 
     private synchronized KeyStore identityStore() throws Exception {
-        File certFile = new File(context.getFilesDir(), "tv-pultas-v3-identity.p12");
+        File certFile = new File(context.getFilesDir(), "tv-pultas-v4-identity.p12");
         KeyStore store = KeyStore.getInstance("PKCS12");
         if (certFile.exists()) {
             try (FileInputStream in = new FileInputStream(certFile)) {
@@ -365,6 +391,13 @@ final class TvProtocol {
         JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
             name, BigInteger.valueOf(now), new Date(now - 86400000L),
             new Date(now + 10L * 365 * 86400000L), name, identity.getPublic());
+        // Match the certificate profile used by the widely deployed
+        // Home Assistant Android TV Remote integration (tronikos/androidtvremote2):
+        // self-signed RSA certificate, CA basic constraint, and DNS SAN.
+        certBuilder.addExtension(Extension.basicConstraints, false,
+                new BasicConstraints(0));
+        certBuilder.addExtension(Extension.subjectAlternativeName, false,
+                new GeneralNames(new GeneralName(GeneralName.dNSName, "atvremote")));
         X509Certificate certificate = new JcaX509CertificateConverter().getCertificate(
             certBuilder.build(new JcaContentSignerBuilder("SHA256withRSA").build(identity.getPrivate())));
         certificate.verify(identity.getPublic());
