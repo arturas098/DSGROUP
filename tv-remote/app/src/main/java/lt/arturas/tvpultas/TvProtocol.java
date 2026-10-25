@@ -16,8 +16,6 @@ import javax.security.auth.x500.X500Principal;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-import org.bouncycastle.asn1.x509.BasicConstraints;
-import org.bouncycastle.asn1.x509.Extension;
 import java.security.cert.Certificate;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -50,6 +48,8 @@ final class TvProtocol {
     private volatile int features;
     private SSLSocket pairing;
     private String address;
+    private volatile String pairingStage = "nepradėta";
+    private volatile String tlsVersion = "auto";
     private X509Certificate pairingPeer;
 
     TvProtocol(Context ctx, Listener callback) {
@@ -94,8 +94,12 @@ final class TvProtocol {
         network.execute(() -> {
             try {
                 closePairing();
-                publish("Laukiama televizoriaus kodo…", false);
+                pairingStage = "TLS ryšys (portas 6467)";
+                publish("Poravimas: saugus TLS ryšys…", false);
                 pairing = tls(address, 6467, false);
+                tlsVersion = pairing.getSession().getProtocol();
+                pairingStage = "užklausa TV (1/3)";
+                publish("Poravimas 1/3: siunčiama užklausa (" + tlsVersion + ")", false);
                 pairingPeer = (X509Certificate) pairing.getSession().getPeerCertificates()[0];
                 pairing.setSoTimeout(12000);
                 OutputStream out = pairing.getOutputStream();
@@ -107,23 +111,32 @@ final class TvProtocol {
                     Proto.Message m = Proto.parse(readFrame(in));
                     verifyStatus(m);
                     if (m.has(11)) {
+                        pairingStage = "TV patvirtino, siunčiamos parinktys (2/3)";
+                        publish("Poravimas 2/3: TV atsakė, parinktys…", false);
                         sendFrame(out, envelope(20, Proto.fields(
                             Proto.nested(1, Proto.fields(Proto.integer(1,3), Proto.integer(2,6))),
                             Proto.integer(3,1))));
                     } else if (m.has(20)) {
+                        pairingStage = "TV parinktys gautos, siunčiama konfigūracija (3/3)";
+                        publish("Poravimas 3/3: TV parinktys gautos…", false);
                         sendFrame(out, envelope(30, Proto.fields(
                             Proto.nested(1, Proto.fields(Proto.integer(1,3), Proto.integer(2,6))),
                             Proto.integer(2,1))));
                     } else if (m.has(31)) {
-                        pairing.setSoTimeout(25000);
+                        pairingStage = "TV rodo kodą";
+                        publish("TV turėtų rodyti 6 simbolių kodą", false);
+                        pairing.setSoTimeout(60000);
                         listener.onPairingCode();
                         return;
                     }
                 }
-                throw new IOException("TV nepatvirtino poravimo");
+                throw new IOException("TV nepatvirtino poravimo; paskutinis žingsnis: " + pairingStage);
             } catch (Exception e) {
                 closePairing();
-                publish("Poravimo klaida: " + summarize(e), false);
+                String error = e instanceof EOFException
+                        ? "TV uždarė ryšį. Žingsnis: " + pairingStage + ", TLS " + tlsVersion
+                        : summarize(e) + " (" + pairingStage + ")";
+                publish("Poravimo klaida: " + error, false);
             }
         });
     }
@@ -133,6 +146,7 @@ final class TvProtocol {
             try {
                 if (pairing == null || pairingPeer == null) throw new IOException("Poravimas nepradėtas");
                 byte[] secret = pairingDigest(code);
+                pairingStage = "siunčiamas kodas";
                 sendFrame(pairing.getOutputStream(), envelope(40, Proto.fields(Proto.data(1, secret))));
                 Proto.Message reply = Proto.parse(readFrame(pairing.getInputStream()));
                 verifyStatus(reply);
@@ -272,7 +286,7 @@ final class TvProtocol {
         SSLContext ssl = SSLContext.getInstance("TLS");
         ssl.init(km.getKeyManagers(), new TrustManager[]{trust}, new SecureRandom());
         SSLSocket socket = (SSLSocket) ssl.getSocketFactory().createSocket();
-        socket.setEnabledProtocols(new String[]{"TLSv1.2"});
+        // Allow the platform to negotiate TLS 1.3 or TLS 1.2 with the TV.
         try {
             socket.connect(new InetSocketAddress(host,port),4500);
             socket.setSoTimeout(7000);
@@ -289,7 +303,7 @@ final class TvProtocol {
     }
 
     private synchronized KeyStore identityStore() throws Exception {
-        File certFile = new File(context.getFilesDir(), "tv-pultas-identity.p12");
+        File certFile = new File(context.getFilesDir(), "tv-pultas-v3-identity.p12");
         KeyStore store = KeyStore.getInstance("PKCS12");
         if (certFile.exists()) {
             try (FileInputStream in = new FileInputStream(certFile)) {
@@ -304,11 +318,10 @@ final class TvProtocol {
         rsa.initialize(2048);
         KeyPair identity = rsa.generateKeyPair();
         long now = System.currentTimeMillis();
-        X500Principal name = new X500Principal("CN=TV Pultas");
+        X500Principal name = new X500Principal("CN=atvremote");
         JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
             name, BigInteger.valueOf(now), new Date(now - 86400000L),
             new Date(now + 10L * 365 * 86400000L), name, identity.getPublic());
-        certBuilder.addExtension(Extension.basicConstraints, false, new BasicConstraints(false));
         X509Certificate certificate = new JcaX509CertificateConverter().getCertificate(
             certBuilder.build(new JcaContentSignerBuilder("SHA256withRSA").build(identity.getPrivate())));
         certificate.verify(identity.getPublic());
