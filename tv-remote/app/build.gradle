@@ -6,6 +6,11 @@ dependencies {
 }
 
 android {
+    packaging {
+        resources {
+            excludes += ['META-INF/versions/**', 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA']
+        }
+    }
     namespace 'lt.arturas.tvpultas'
     compileSdk 35
     defaultConfig {
