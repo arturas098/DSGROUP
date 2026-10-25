@@ -32,14 +32,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TV-Pultas-APK
-          path: TV-Pultas-debug.apk
+          path: TV-Pultas-v1.1.apk
           if-no-files-found: error
       - name: Publish downloadable APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view tv-pultas-v1-1 >/dev/null 2>&1; then
-            gh release upload tv-pultas-v1-1 TV-Pultas-debug.apk --clobber
+            gh release upload tv-pultas-v1-1 TV-Pultas-v1.1.apk --clobber
           else
-            gh release create tv-pultas-v1-1 TV-Pultas-debug.apk --title "TV Pultas v1.1" --notes "Standalone Android TV remote (debug APK)" --latest=false
+            gh release create tv-pultas-v1-1 TV-Pultas-v1.1.apk --title "TV Pultas v1.1" --notes "Standalone Android TV remote (debug APK)" --latest=false
           fi
