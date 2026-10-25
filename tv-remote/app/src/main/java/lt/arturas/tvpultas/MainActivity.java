@@ -29,6 +29,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
     private NsdManager.DiscoveryListener finder;
     private final Map<String,String> found = new LinkedHashMap<>();
     private String tvName = "Televizorius";
+    private String lastStatusMessage = "Pasirink televizorių";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -116,7 +117,17 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
 
         status=label(tv.isConnected()?"Prisijungta":(tv.hasPairing()?"Jungiamasi…":"Pasirink televizorių"),12,Color.LTGRAY);
         status.setGravity(Gravity.LEFT|Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams statP=new LinearLayout.LayoutParams(-1,dp(24));
+        status.setMaxLines(2);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setOnClickListener(v -> new AlertDialog.Builder(this)
+            .setTitle("TV ryšio informacija")
+            .setMessage(lastStatusMessage)
+            .setPositiveButton("Gerai",null)
+            .setNeutralButton("Poruoti iš naujo",(dialog,button) -> {
+                if(!tv.lastHost().isEmpty()) tv.beginPairing(tv.lastHost());
+                else chooseTv();
+            }).show());
+        LinearLayout.LayoutParams statP=new LinearLayout.LayoutParams(-1,dp(41));
         statP.topMargin=dp(8);
         root.addView(status,statP);
 
@@ -239,10 +250,12 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
             }
         }
         names.add("Įvesti TV IP adresą");
+        if (tv.hasPairing() && !tv.lastHost().isEmpty()) names.add("Poruoti iš naujo (paskutinis TV)");
         new AlertDialog.Builder(this)
             .setTitle("Pasirink televizorių")
             .setItems(names.toArray(new String[0]),(dialog,which)->{
                 if(which==hosts.size()) enterIp();
+                else if(which==hosts.size()+1) tv.beginPairing(tv.lastHost());
                 else askPairOrConnect(hosts.get(which),names.get(which));
             })
             .setNegativeButton("Atšaukti",null)
@@ -303,6 +316,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
     }
     @Override public void onStatus(String message,boolean connected) {
         runOnUiThread(()->{
+            lastStatusMessage=message;
             if(status!=null) status.setText((connected?"● ":"○ ")+message);
             if(deviceLabel!=null) deviceLabel.setBackground(shape(connected?GREEN:Color.rgb(151,160,154),dp(26)));
         });
