@@ -1,0 +1,45 @@
+name: Build TV Pultas APK
+on:
+  push:
+    branches: [master]
+    paths:
+      - "tv-remote/**"
+      - ".github/workflows/build-tv-pultas.yml"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Install SDK
+        run: |
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+      - name: Compile TV Pultas
+        run: gradle --no-daemon -p tv-remote :app:assembleDebug
+      - name: Name APK
+        run: cp tv-remote/app/build/outputs/apk/debug/app-debug.apk TV-Pultas-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TV-Pultas-APK
+          path: TV-Pultas-debug.apk
+          if-no-files-found: error
+      - name: Publish downloadable APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view tv-pultas-v1 >/dev/null 2>&1; then
+            gh release upload tv-pultas-v1 TV-Pultas-debug.apk --clobber
+          else
+            gh release create tv-pultas-v1 TV-Pultas-debug.apk --title "TV Pultas v1" --notes "Standalone Android TV remote (debug APK)" --latest=false
+          fi
