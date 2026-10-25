@@ -441,7 +441,7 @@ final class TvProtocol {
     }
 
     /** Minimal protocol buffers framing; no generated code/runtime required. */
-    private static final class Proto {
+    static final class Proto {
         static class Message {
             final Map<Integer,byte[]> data=new HashMap<>();
             final Map<Integer,Long> scalars=new HashMap<>();
@@ -491,7 +491,16 @@ final class TvProtocol {
                     long len=readVarint(stream);
                     if(len<0||len>stream.available()) throw new IOException("Bad proto size");
                     byte[] buffer=new byte[(int)len];
-                    if(stream.read(buffer)!=len) throw new EOFException();
+                    // A zero-length nested protobuf message is VALID, especially
+                    // pairingRequestAck {} and configurationAck {}. Java's
+                    // ByteArrayInputStream.read(new byte[0]) returns -1 at EOF,
+                    // not 0, so never call read when len == 0.
+                    int offset=0;
+                    while(offset<buffer.length) {
+                        int n=stream.read(buffer,offset,buffer.length-offset);
+                        if(n<=0) throw new EOFException("Truncated protobuf field " + id);
+                        offset+=n;
+                    }
                     msg.data.put(id,buffer);
                 } else if(wire==1) {
                     if(stream.skip(8)!=8) throw new EOFException();

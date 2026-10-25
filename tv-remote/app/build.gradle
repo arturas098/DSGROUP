@@ -3,6 +3,7 @@ plugins { id 'com.android.application' }
 // Standard BouncyCastle X.509 certificate generation; used only when pairing.
 dependencies {
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
+    testImplementation 'junit:junit:4.13.2'
 }
 
 android {
@@ -17,8 +18,8 @@ android {
         applicationId 'lt.arturas.tvpultas'
         minSdk 28
         targetSdk 32
-        versionCode 5
-        versionName '1.4'
+        versionCode 6
+        versionName '1.5'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

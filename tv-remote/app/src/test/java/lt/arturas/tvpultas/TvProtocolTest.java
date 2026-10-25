@@ -1,0 +1,43 @@
+package lt.arturas.tvpultas;
+
+import org.junit.Test;
+import static org.junit.Assert.*;
+
+/** Known-valid Google TV Polo frames (AndroidTVRemote2 + MiTV-Remote fixtures). */
+public class TvProtocolTest {
+    @Test public void emptyPairingRequestAckAtEndOfFrameIsValid() throws Exception {
+        byte[] ack={8,2,16,(byte)200,1,90,0};
+        TvProtocol.Proto.Message parsed=TvProtocol.Proto.parse(ack);
+        assertTrue(parsed.has(11));
+        assertArrayEquals(new byte[0],parsed.data.get(11));
+        assertEquals(200L,parsed.number(2,0));
+    }
+
+    @Test public void emptyConfigurationAckAtEndOfFrameIsValid() throws Exception {
+        byte[] ack={8,2,16,(byte)200,1,(byte)250,1,0};
+        TvProtocol.Proto.Message parsed=TvProtocol.Proto.parse(ack);
+        assertTrue(parsed.has(31));
+        assertArrayEquals(new byte[0],parsed.data.get(31));
+    }
+
+    @Test public void optionsMessageDecodes() throws Exception {
+        byte[] ack={8,2,16,(byte)200,1,(byte)162,1,8,18,4,8,3,16,6,24,1};
+        TvProtocol.Proto.Message parsed=TvProtocol.Proto.parse(ack);
+        assertTrue(parsed.has(20));
+        TvProtocol.Proto.Message options=parsed.child(20);
+        assertEquals(1L,options.number(3,0));
+    }
+
+    @Test public void requestMatchesWorkingAndroidTvProtocol() {
+        byte[] request=TvProtocol.Proto.fields(
+            TvProtocol.Proto.integer(1,2),TvProtocol.Proto.integer(2,200),
+            TvProtocol.Proto.nested(10,TvProtocol.Proto.fields(
+                TvProtocol.Proto.text(1,"atvremote"),
+                TvProtocol.Proto.text(2,"Mi Remote"))));
+        byte[] known={
+            8,2,16,(byte)200,1,82,22,10,9,97,116,118,114,101,109,111,116,101,
+            18,9,77,105,32,82,101,109,111,116,101
+        };
+        assertArrayEquals(known,request);
+    }
+}
