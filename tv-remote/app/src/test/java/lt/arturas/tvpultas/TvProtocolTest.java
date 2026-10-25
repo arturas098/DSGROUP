@@ -86,4 +86,17 @@ public class TvProtocolTest {
         assertEquals(7L,field.number(1,-1));
         assertEquals(7L,field.number(2,-1));
     }
+    @Test public void liveTypingLatinLettersMapToAndroidKeyCodes() {
+        assertEquals(29,TvProtocol.keyCodeForCodePoint('a'));
+        assertEquals(33,TvProtocol.keyCodeForCodePoint('E'));
+        assertEquals(36,TvProtocol.keyCodeForCodePoint('h'));
+        assertEquals(16,TvProtocol.keyCodeForCodePoint('9'));
+    }
+
+    @Test public void liveTypingHandlesSpacesAndDeletionControl() {
+        assertEquals(62,TvProtocol.keyCodeForCodePoint(' '));
+        assertEquals(66,TvProtocol.keyCodeForCodePoint('\n'));
+        assertEquals(69,TvProtocol.keyCodeForCodePoint('-'));
+        assertEquals(-1,TvProtocol.keyCodeForCodePoint('ė'));
+    }
 }

@@ -29,9 +29,8 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
     private EditText typing;
     private TextView keyboardInfo;
     private boolean keyboardShown;
-    private boolean liveTyping=false;
-    private int textMode=0;
-    private TextView modeControl, liveControl;
+    private int textMode=2; // key-by-key injection by default
+    private TextView modeControl;
     private NsdManager nsd;
     private NsdManager.DiscoveryListener finder;
     private final Map<String,String> found = new LinkedHashMap<>();
@@ -94,7 +93,6 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
         keyboardShown=typingMode;
         keyboardInfo=null;
         modeControl=null;
-        liveControl=null;
         root=new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(20),dp(12),dp(20),dp(16));
@@ -192,7 +190,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
         typing.setTextSize(39);
         typing.setTextColor(Color.rgb(225,225,225));
         typing.setHintTextColor(Color.rgb(139,139,142));
-        typing.setHint("Rašykite telefonu,\ntada spauskite SIŲSTI");
+        typing.setHint("Rašykite – kiekviena raidė\niškart keliauja į TV");
         typing.setGravity(Gravity.TOP|Gravity.START);
         typing.setInputType(android.text.InputType.TYPE_CLASS_TEXT |
             android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES |
@@ -215,7 +213,8 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
                 int limit=Math.min(previous.length(),current.length());
                 while(common<limit && previous.charAt(common)==current.charAt(common))
                     common++;
-                if (!liveTyping) return; // Batch-send is more compatible.
+                // No debounce, no timer and no Send button. Every keyboard
+                // edit is dispatched immediately over the ordered write queue.
                 int removed=previous.codePointCount(common,previous.length());
                 for(int i=0;i<removed;i++) tv.key(67);
                 if(common<current.length())
@@ -224,7 +223,7 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
             @Override public void afterTextChanged(Editable e) {}
         });
         typing.setOnEditorActionListener((view,id,event)->{
-            sendKeyboardText();
+            sendKey(66); // Enter/Search; do not retransmit the whole string
             return true;
         });
 
@@ -232,35 +231,20 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
         keyboardInfo.setGravity(Gravity.CENTER);
         body.addView(keyboardInfo,new LinearLayout.LayoutParams(-1,dp(30)));
 
-        // Android TV Remote v2 has no text ACK, so a whole-string send is
-        // the safe default. Live typing can be enabled explicitly.
-        LinearLayout actions=row();
-        LinearLayout.LayoutParams actionP=new LinearLayout.LayoutParams(-1,dp(53));
-        actionP.bottomMargin=dp(7);
-        body.addView(actions,actionP);
-        TextView send=pill("SIŲSTI Į TV",GREEN,16,22,this::sendKeyboardText);
-        send.setTextColor(Color.rgb(16,43,29));
-        addWeighted(actions,send,50,1.65f,3);
-        TextView hide=pill("Slėpti TV klaviatūrą",BUTTON,12,22,()->{
-            tv.hideTvKeyboard();
-            Toast.makeText(this,"TV gavo BACK – dabar bandyk SIŲSTI",Toast.LENGTH_SHORT).show();
-        });
-        addWeighted(actions,hide,50,1.35f,3);
+        TextView liveStatus=label("●  GYVAS RAŠYMAS · BE DELSIMO",13,GREEN);
+        body.addView(liveStatus,new LinearLayout.LayoutParams(-1,dp(27)));
 
-        LinearLayout options=row();
-        LinearLayout.LayoutParams optionP=new LinearLayout.LayoutParams(-1,dp(38));
-        optionP.bottomMargin=dp(4);
-        body.addView(options,optionP);
-        modeControl=pill(modeTitle(),BACKGROUND,13,20,()->{
+        LinearLayout controls=row();
+        LinearLayout.LayoutParams controlsP=new LinearLayout.LayoutParams(-1,dp(46));
+        controlsP.bottomMargin=dp(7);
+        body.addView(controls,controlsP);
+        modeControl=pill(modeTitle(),BACKGROUND,13,18,()->{
             textMode=(textMode+1)%3;
-            if(modeControl!=null) modeControl.setText(modeTitle());
+            modeControl.setText(modeTitle());
         });
-        addWeighted(options,modeControl,36,1.5f,3);
-        liveControl=pill("Gyvai: IŠJ.",BACKGROUND,13,20,()->{
-            liveTyping=!liveTyping;
-            if(liveControl!=null) liveControl.setText(liveTyping?"Gyvai: ĮJ.":"Gyvai: IŠJ.");
-        });
-        addWeighted(options,liveControl,36,1,3);
+        addWeighted(controls,modeControl,43,1.05f,3);
+        TextView hide=pill("TV klaviatūra ◀",BUTTON,13,18,()->tv.hideTvKeyboard());
+        addWeighted(controls,hide,43,1.05f,3);
 
         TextView switcher=label("⠿   Grįžti į pultą",17,GREY);
         switcher.setBackground(borderShape(BACKGROUND,50));
@@ -272,29 +256,15 @@ public class MainActivity extends Activity implements TvProtocol.Listener {
             buildScreen(false);
         });
         typing.requestFocus();
-        typing.postDelayed(()-> {
+        typing.post(()-> {
             InputMethodManager ime=(InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
             ime.showSoftInput(typing,InputMethodManager.SHOW_IMPLICIT);
-        },200);
+        });
     }
     private String modeTitle() {
-        if(textMode==0) return "Būdas: IME A";
-        if(textMode==1) return "Būdas: IME B";
-        return "Būdas: mygtukai";
-    }
-
-    private void sendKeyboardText() {
-        if(typing==null) return;
-        String content=typing.getText().toString();
-        if(content.isEmpty()) return;
-        if(!tv.isConnected()) {
-            Toast.makeText(this,"TV neprisijungęs",Toast.LENGTH_SHORT).show();
-            return;
-        }
-        tv.sendTextMode(content,textMode);
-        // Sending a packet doesn't mean the TV applied it. No ACK exists.
-        Toast.makeText(this,"Siuntimo komanda išsiųsta (TV patvirtinimo nėra)",
-                Toast.LENGTH_LONG).show();
+        if(textMode==0) return "IME A (gyvai)";
+        if(textMode==1) return "IME B (gyvai)";
+        return "Raidės (gyvai)";
     }
 
     private void sendKey(int code) {

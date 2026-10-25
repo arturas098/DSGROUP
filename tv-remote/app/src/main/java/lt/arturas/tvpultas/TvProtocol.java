@@ -285,7 +285,7 @@ final class TvProtocol {
 
     void key(int keyCode) {
         if (!ready) return;
-        sendRemote(Proto.nested(10, Proto.fields(Proto.integer(1,keyCode),Proto.integer(2,3))));
+        sendKeyPacket(keyCode,3);
     }
 
     void text(String content) {
@@ -307,20 +307,58 @@ final class TvProtocol {
         }
     }
 
+    /**
+     * Send every character through the TV remote key-injection protocol with
+     * no artificial timeouts. Enqueue START/END SHIFT around uppercase Latin
+     * letters, preserving packet order on the single network writer.
+     * For non-Latin characters, fall back to one IME insertion per code point.
+     */
     private void sendAsciiKeys(String content) {
-        for (int i=0; i<content.length();i++) {
-            char c=Character.toLowerCase(content.charAt(i));
-            int code;
-            if(c >= 'a' && c <= 'z') code = 29 + (c - 'a');
-            else if(c >= '0' && c <= '9') code = 7 + (c - '0');
-            else if(c == ' ') code = 62;
-            else if(c == '.') code = 56;
-            else if(c == ',') code = 55;
-            else if(c == '-') code = 69;
-            else if(c == '/') code = 76;
-            else continue; // Unsupported character in the keycode fallback
-            key(code);
+        for(int offset=0;offset<content.length();) {
+            int point=content.codePointAt(offset);
+            offset += Character.charCount(point);
+            int code=keyCodeForCodePoint(point);
+            if (code<0) {
+                sendRemote(imePacketVariant(imeCounter,fieldCounter,
+                        new String(Character.toChars(point)),false));
+                continue;
+            }
+            if (point >= 'A' && point <= 'Z') {
+                sendKeyPacket(59,1); // press SHIFT
+                sendKeyPacket(code,3);
+                sendKeyPacket(59,2); // release SHIFT
+            } else {
+                sendKeyPacket(code,3);
+            }
         }
+    }
+
+    /** Android Remote v2 key codes (Android KeyEvent namespace). */
+    static int keyCodeForCodePoint(int point) {
+        if(point>='a'&&point<='z') return 29+point-'a';
+        if(point>='A'&&point<='Z') return 29+point-'A';
+        if(point>='0'&&point<='9') return 7+point-'0';
+        switch(point) {
+            case ' ': return 62;
+            case '\n': return 66;
+            case '.': return 56;
+            case ',': return 55;
+            case '-': return 69;
+            case '/': return 76;
+            case '=': return 70;
+            case ';': return 74;
+            case '\'': return 75;
+            case '@': return 77;
+            case '+': return 81;
+            case '*': return 17;
+            case '#': return 18;
+            default: return -1;
+        }
+    }
+
+    private void sendKeyPacket(int keyCode,int direction) {
+        sendRemote(Proto.nested(10,Proto.fields(
+            Proto.integer(1,keyCode),Proto.integer(2,direction))));
     }
 
     void hideTvKeyboard() { key(4); }
